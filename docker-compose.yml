@@ -1,0 +1,317 @@
+# Ledger -- full local stack.
+#
+# `make up` brings this to a working state in under 20 minutes on a clean
+# machine, most of which is the historical backfill.
+#
+# Dependency ordering uses `condition: service_healthy` throughout rather than
+# plain `depends_on`. Plain depends_on waits for the container to START, not to
+# be READY, which on a cold boot means the API races Postgres's initialisation
+# and half the stack crash-loops for the first minute. It eventually converges,
+# which is worse than failing -- it trains you to ignore startup errors.
+
+name: ledger
+
+x-common-env: &common-env
+  TZ: UTC
+  PYTHONUNBUFFERED: "1"
+
+x-restart: &restart
+  restart: unless-stopped
+
+services:
+
+  # ======================================================================== #
+  # Source system
+  # ======================================================================== #
+
+  postgres:
+    image: postgres:16-alpine
+    <<: *restart
+    environment:
+      <<: *common-env
+      POSTGRES_USER: ${POSTGRES_USER:-ledger}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ledger}
+      POSTGRES_DB: ${POSTGRES_DB:-ledger}
+    command:
+      - postgres
+      # Logical replication. wal_level cannot be changed without a restart, so
+      # it is set here rather than in the init script.
+      - -c
+      - wal_level=logical
+      - -c
+      - max_replication_slots=8
+      - -c
+      - max_wal_senders=8
+      # A slot that stops advancing retains WAL forever and fills the disk.
+      # This caps the damage at 4GB and kills the slot instead of the database.
+      # The Debezium heartbeat exists so this should never trigger.
+      - -c
+      - max_slot_wal_keep_size=4096
+      - -c
+      - shared_buffers=512MB
+      - -c
+      - work_mem=32MB
+      # The backfill writes 5M rows through COPY; the default 16MB WAL setting
+      # forces a checkpoint every few seconds and roughly triples the load time.
+      - -c
+      - max_wal_size=4GB
+      - -c
+      - checkpoint_timeout=15min
+    ports: ["5432:5432"]
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./infra/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ledger} -d ${POSTGRES_DB:-ledger}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+
+  commerce-api:
+    build:
+      context: ./services/commerce-api
+      target: runtime
+    <<: *restart
+    environment:
+      <<: *common-env
+      COMMERCE_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-ledger}:${POSTGRES_PASSWORD:-ledger}@postgres:5432/${POSTGRES_DB:-ledger}
+      COMMERCE_ENV: docker
+      COMMERCE_LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    ports: ["8000:8000"]
+    depends_on:
+      postgres: {condition: service_healthy}
+      migrate:  {condition: service_completed_successfully}
+
+  # Migrations as a one-shot job, not as an API entrypoint step. Running them
+  # on API startup means N replicas race to migrate the same database.
+  migrate:
+    build:
+      context: ./services/commerce-api
+      target: runtime
+    environment:
+      <<: *common-env
+      COMMERCE_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-ledger}:${POSTGRES_PASSWORD:-ledger}@postgres:5432/${POSTGRES_DB:-ledger}
+    # Stops at 0002. Migration 0003 (orders.channel) is applied later, ON
+    # PURPOSE, by `make schema-change` -- so the pipeline can be observed
+    # surviving a schema change while it is running. See INCIDENTS.md#004.
+    command: ["alembic", "upgrade", "0002"]
+    depends_on:
+      postgres: {condition: service_healthy}
+    restart: on-failure
+
+  loadgen:
+    build: ./services/loadgen
+    <<: *restart
+    environment:
+      <<: *common-env
+      LOADGEN_API_URL: http://commerce-api:8000
+      COMMERCE_DATABASE_URL: postgresql://${POSTGRES_USER:-ledger}:${POSTGRES_PASSWORD:-ledger}@postgres:5432/${POSTGRES_DB:-ledger}
+      LOADGEN_ORDERS_PER_MINUTE: ${LOADGEN_RATE:-12}
+      LOADGEN_METRICS_PORT: "9102"
+    ports: ["9102:9102"]
+    depends_on:
+      commerce-api: {condition: service_healthy}
+
+  # ======================================================================== #
+  # Ingestion
+  # ======================================================================== #
+
+  redpanda:
+    image: redpandadata/redpanda:v24.3.1
+    <<: *restart
+    command:
+      - redpanda
+      - start
+      - --overprovisioned
+      - --smp=1
+      - --memory=1G
+      - --reserve-memory=0M
+      - --node-id=0
+      - --check=false
+      - --kafka-addr=PLAINTEXT://0.0.0.0:9092
+      - --advertise-kafka-addr=PLAINTEXT://redpanda:9092
+    ports: ["9092:9092", "9644:9644"]
+    volumes: [redpanda-data:/var/lib/redpanda/data]
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true'"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+
+  connect:
+    image: debezium/connect:2.7.3.Final
+    <<: *restart
+    environment:
+      <<: *common-env
+      BOOTSTRAP_SERVERS: redpanda:9092
+      GROUP_ID: ledger-connect
+      CONFIG_STORAGE_TOPIC: _connect_configs
+      OFFSET_STORAGE_TOPIC: _connect_offsets
+      STATUS_STORAGE_TOPIC: _connect_status
+      CONFIG_STORAGE_REPLICATION_FACTOR: "1"
+      OFFSET_STORAGE_REPLICATION_FACTOR: "1"
+      STATUS_STORAGE_REPLICATION_FACTOR: "1"
+      # Lets connector.json reference credentials by file rather than inlining
+      # them -- an inline password is written to Connect's own config topic in
+      # plaintext, permanently.
+      CONNECT_CONFIG_PROVIDERS: file
+      CONNECT_CONFIG_PROVIDERS_FILE_CLASS: org.apache.kafka.common.config.provider.FileConfigProvider
+    ports: ["8083:8083"]
+    volumes:
+      - ./infra/debezium/secrets.properties:/etc/kafka-connect/secrets.properties:ro
+    depends_on:
+      redpanda: {condition: service_healthy}
+      postgres: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8083/connectors || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 40s
+
+  minio:
+    image: minio/minio:RELEASE.2024-11-07T00-52-20Z
+    <<: *restart
+    command: server /data --console-address ":9001"
+    environment:
+      <<: *common-env
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:-minioadmin}
+    ports: ["9000:9000", "9001:9001"]
+    volumes: [minio-data:/data]
+    healthcheck:
+      test: ["CMD-SHELL", "mc ready local || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+
+  cdc-sink:
+    build:
+      context: ./services/cdc-sink
+      target: runtime
+    <<: *restart
+    environment:
+      <<: *common-env
+      SINK_BOOTSTRAP_SERVERS: redpanda:9092
+      SINK_S3_ENDPOINT_URL: http://minio:9000
+      SINK_S3_BUCKET: ${S3_BUCKET:-ledger-raw}
+      SINK_S3_ACCESS_KEY: ${S3_ACCESS_KEY:-minioadmin}
+      SINK_S3_SECRET_KEY: ${S3_SECRET_KEY:-minioadmin}
+      SINK_BATCH_MAX_RECORDS: "50000"
+      SINK_BATCH_MAX_SECONDS: "60"
+    ports: ["9103:9103"]
+    volumes:
+      # The schema registry MUST survive a restart. Losing it makes the guard
+      # treat every table as newly-seen, which silently accepts a schema change
+      # it would otherwise have rejected.
+      - sink-state:/var/lib/ledger
+    depends_on:
+      redpanda: {condition: service_healthy}
+      minio:    {condition: service_healthy}
+
+  # ======================================================================== #
+  # Warehouse and orchestration
+  # ======================================================================== #
+
+  airflow:
+    build:
+      # Context is the repo root, not orchestration/, because the image needs
+      # the sink's storage module and the proof scripts as well as the DAGs.
+      context: .
+      dockerfile: orchestration/Dockerfile
+    <<: *restart
+    environment:
+      <<: *common-env
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER:-ledger}:${POSTGRES_PASSWORD:-ledger}@postgres:5432/airflow
+      AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "False"
+      AIRFLOW__CORE__PARALLELISM: "8"
+      AIRFLOW__SCHEDULER__CATCHUP_BY_DEFAULT: "False"
+      # Variables the DAGs read. Never literals in the DAG files themselves.
+      AIRFLOW_VAR_DBT_TARGET: dev
+      AIRFLOW_VAR_DBT_PROFILES_DIR: /opt/ledger/transform
+      AIRFLOW_VAR_DBT_DUCKDB_PATH: /data/warehouse/ledger.duckdb
+      AIRFLOW_VAR_LEDGER_RAW_PATH: s3://${S3_BUCKET:-ledger-raw}
+      AIRFLOW_VAR_KAFKA_BOOTSTRAP: redpanda:9092
+      AIRFLOW_VAR_SINK_S3_ACCESS_KEY: ${S3_ACCESS_KEY:-minioadmin}
+      AIRFLOW_VAR_SINK_S3_SECRET_KEY: ${S3_SECRET_KEY:-minioadmin}
+      AIRFLOW_VAR_DBT_S3_ENDPOINT: minio:9000
+      SINK_S3_ENDPOINT_URL: http://minio:9000
+      LEDGER_DBT_DIR: /opt/ledger/transform
+    ports: ["8080:8080"]
+    volumes:
+      - ./orchestration/dags:/opt/airflow/dags:ro
+      - ./transform:/opt/ledger/transform
+      - warehouse-data:/data/warehouse
+      - airflow-logs:/opt/airflow/logs
+    depends_on:
+      postgres: {condition: service_healthy}
+      cdc-sink: {condition: service_started}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+
+  # ======================================================================== #
+  # Serving
+  # ======================================================================== #
+
+  metrics-api:
+    build:
+      context: ./services/metrics-api
+      target: runtime
+    <<: *restart
+    environment:
+      <<: *common-env
+      METRICS_WAREHOUSE_PATH: /data/warehouse/ledger.duckdb
+      METRICS_API_KEYS: ${METRICS_API_KEYS:-dev-key-change-me}
+      METRICS_STALENESS_THRESHOLD_HOURS: "26"
+    ports: ["8001:8000"]
+    volumes:
+      # Read-only mount: the serving layer must never be able to write to the
+      # warehouse, and making that a filesystem guarantee is stronger than
+      # making it a code convention.
+      - warehouse-data:/data/warehouse:ro
+    depends_on:
+      airflow: {condition: service_started}
+
+  dashboard:
+    build: ./infra/dashboard
+    <<: *restart
+    environment:
+      <<: *common-env
+      DASHBOARD_WAREHOUSE_PATH: /data/warehouse/ledger.duckdb
+      DASHBOARD_METRICS_URL: http://metrics-api:8000
+      DASHBOARD_API_KEY: ${METRICS_API_KEYS:-dev-key-change-me}
+    ports: ["8501:8501"]
+    volumes:
+      - warehouse-data:/data/warehouse:ro
+    depends_on:
+      metrics-api: {condition: service_started}
+
+  prometheus:
+    image: prom/prometheus:v3.0.1
+    <<: *restart
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=15d
+    ports: ["9090:9090"]
+    volumes:
+      - ./infra/prometheus:/etc/prometheus:ro
+      - prometheus-data:/prometheus
+
+volumes:
+  postgres-data:
+  redpanda-data:
+  minio-data:
+  warehouse-data:
+  airflow-logs:
+  prometheus-data:
+  sink-state:

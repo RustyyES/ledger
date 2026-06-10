@@ -1,0 +1,62 @@
+# Tool configuration only. Each service pins its own runtime dependencies in
+# its own requirements.txt, because each service builds its own image and
+# should not carry another's dependency tree.
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = ["transform/dbt_packages", "**/alembic/versions"]
+
+[tool.ruff.lint]
+select = [
+    "E", "F", "W",      # pycodestyle, pyflakes
+    "I",                # import sorting
+    "B",                # bugbear
+    "UP",               # pyupgrade
+    "C4",               # comprehensions
+    "SIM",              # simplify
+    "RUF",
+]
+ignore = [
+    # Long lines in comments are how the reasoning gets written down. The
+    # formatter handles code; prose is allowed to run to the margin.
+    "E501",
+    # Asserts are used in tests and as internal invariants, deliberately.
+    "S101",
+    # `Depends(...)`, `Query(...)`, `Header(...)` in argument defaults IS the
+    # FastAPI idiom -- the framework inspects those objects to build the
+    # dependency graph. B008 exists to catch mutable defaults; these are
+    # immutable markers, so it is a false positive on every FastAPI route.
+    "B008",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"**/tests/**" = ["B011", "SIM117"]
+"services/loadgen/profiles.py" = ["E741"]
+
+[tool.pytest.ini_options]
+testpaths = ["services", "orchestration"]
+python_files = ["test_*.py"]
+addopts = "-q --strict-markers"
+filterwarnings = [
+    "ignore::DeprecationWarning:starlette.*",
+    "ignore::DeprecationWarning:airflow.*",
+]
+
+[tool.mypy]
+python_version = "3.12"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+ignore_missing_imports = true
+exclude = ["alembic/versions", "dbt_packages"]
+
+[tool.coverage.run]
+omit = ["*/tests/*", "*/alembic/*"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]

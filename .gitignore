@@ -1,0 +1,54 @@
+# --- secrets ---------------------------------------------------------------
+.env
+*.pem
+*.p8
+secrets.local.properties
+
+# --- python ----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+*.egg-info/
+
+# --- dbt -------------------------------------------------------------------
+transform/target/
+transform/dbt_packages/
+transform/logs/
+# dbt writes an anonymous-usage id here on first run. Machine-local.
+transform/.user.yml
+# package-lock.yml IS committed: it pins the exact package versions, and a
+# lockfile that is not committed is not a lockfile.
+
+# --- warehouses and data ---------------------------------------------------
+*.duckdb
+*.duckdb.wal
+ci_warehouse.duckdb
+data/
+raw/
+
+# --- airflow ---------------------------------------------------------------
+orchestration/logs/
+airflow.db
+airflow.cfg
+webserver_config.py
+
+# --- editors / os ----------------------------------------------------------
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# The book's rendered page is generated from the markdown chapters by
+# docs/book/build_html.py. The chapters are the source of truth; committing the
+# 266KB render would just create merge conflicts on every edit.
+docs/book/ledger-book.html
+
+# results/ IS committed. Those files are the evidence for the claims in the
+# README, and a proof nobody can see is an assertion.
