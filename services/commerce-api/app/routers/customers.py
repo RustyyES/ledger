@@ -106,9 +106,14 @@ def soft_delete_customer(
     stays recognised; deleting a customer is a privacy action, not a financial
     correction. `DESIGN.md` records that decision and the warehouse honours it.
     """
-    customer = _load(session, customer_id)
+    # include_deleted=True so an already-deleted row is found rather than 404ing.
+    # DELETE is idempotent here by design: the load generator retries on
+    # timeout, and a retry after a successful delete must not be logged as a
+    # failure. RFC 9110 requires the same *effect*, not the same status code,
+    # so returning the current state is both correct and operationally kinder.
+    customer = _load(session, customer_id, include_deleted=True)
     if customer.deleted_at is not None:
-        raise Conflict("customer is already deleted")
+        return CustomerOut.model_validate(customer)
 
     now = datetime.now(UTC)
     customer.deleted_at = now
