@@ -21,11 +21,15 @@ from pydantic import (
     model_validator,
 )
 
+# NOTE: the pattern is case-INSENSITIVE even though the stored value is
+# upper-case. Pydantic v2 applies `pattern` BEFORE `to_upper`, so a
+# `^[A-Z]{2}$` pattern rejects the very lowercase input that `to_upper` exists
+# to normalise. Tested by `test_create_customer_returns_201_and_echoes_fields`.
 CountryCode = Annotated[
-    str, StringConstraints(min_length=2, max_length=2, to_upper=True, pattern=r"^[A-Z]{2}$")
+    str, StringConstraints(min_length=2, max_length=2, to_upper=True, pattern=r"^[A-Za-z]{2}$")
 ]
 CurrencyCode = Annotated[
-    str, StringConstraints(min_length=3, max_length=3, to_upper=True, pattern=r"^[A-Z]{3}$")
+    str, StringConstraints(min_length=3, max_length=3, to_upper=True, pattern=r"^[A-Za-z]{3}$")
 ]
 
 SUPPORTED_CURRENCIES = frozenset({"USD", "EUR", "GBP"})
