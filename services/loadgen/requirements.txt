@@ -1,0 +1,4 @@
+httpx==0.28.1
+psycopg[binary]==3.2.3
+structlog==24.4.0
+prometheus-client==0.21.1
