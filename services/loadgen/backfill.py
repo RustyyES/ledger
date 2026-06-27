@@ -162,6 +162,13 @@ class Backfill:
     def __init__(self, *, scale: float, seed: int, end: date | None = None) -> None:
         self.rng = random.Random(seed)
         self.scale = scale
+        # History must not run past the moment of generation. Orders are placed
+        # at a random hour of their day, so picking today as a candidate day
+        # produces timestamps later today -- which arrive in the warehouse as
+        # future-dated orders and fail `assert_no_future_dated_orders`. That
+        # test exists to catch timezone bugs; a generator that trips it for an
+        # unrelated reason makes the real signal unreadable.
+        self.generated_at = datetime.now(UTC)
         self.target_customers = max(50, int(P.TARGET_CUSTOMERS * scale))
         self.target_orders = max(200, int(P.TARGET_ORDERS * scale))
         self.end_date = end or datetime.now(UTC).date()
