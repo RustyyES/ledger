@@ -681,6 +681,15 @@ class Backfill:
         return written
 
     def write(self, conn: psycopg.Connection) -> None:
+        # ORDER MATTERS. `simulate_lifecycles()` mutates CustomerState in place
+        # -- it is what sets `deleted_at`, `updated_at`, `sub_status` and
+        # `sub_ended`. Materialising the customer rows before running it
+        # captures every customer in their pre-simulation state, which silently
+        # produces zero soft deletes. `verify()` catches that; this ordering is
+        # what makes it pass.
+        events = list(self.simulate_lifecycles())
+        orders, payments, refunds = self.generate_transactions()
+
         customers = [
             (
                 c.id,
@@ -694,8 +703,6 @@ class Backfill:
             )
             for c in self.customers
         ]
-        events = list(self.simulate_lifecycles())
-        orders, payments, refunds = self.generate_transactions()
 
         # Subscriptions are derived from the final in-memory state, so they are
         # written after the lifecycle walk has run.
