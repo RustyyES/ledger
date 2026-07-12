@@ -1,0 +1,120 @@
+name: "ledger"
+version: "1.0.0"
+config-version: 2
+
+profile: "ledger"
+
+model-paths: ["models"]
+seed-paths: ["seeds"]
+test-paths: ["tests"]
+macro-paths: ["macros"]
+snapshot-paths: ["snapshots"]
+
+target-path: "target"
+clean-targets: ["target", "dbt_packages"]
+
+require-dbt-version: [">=1.8.0", "<2.0.0"]
+
+# --------------------------------------------------------------------------- #
+# Variables
+#
+# `incremental_lookback_days` is the single most consequential number in this
+# project, and the derivation below is not padding -- it was set to 15 first and
+# that was WRONG. A build against real generated data produced a refund with a
+# measured lag of 16 days, and `between_fct_payments_refund_lag_days` caught it.
+#
+# The mistake was reasoning from the business parameter alone:
+#
+#   REFUND_DELAY_DAYS max = 14      (services/loadgen/profiles.py)
+#   -> "so 15 gives a day of headroom"
+#
+# It does not, because `date_diff('day', ...)` counts CALENDAR BOUNDARIES
+# CROSSED, not elapsed 24-hour periods. A payment at 23:53 refunded 14 days and
+# 1 hour later crosses 16 day-boundaries. The business rule says 14; the
+# measurement says 16; only the measurement matters to the filter.
+#
+#   14   business maximum refund delay
+#  + 2   calendar-boundary counting at the edges of the day
+#  + 5   operational slack: a sink backlog, a missed DAG run over a weekend,
+#        clock skew between the source and the warehouse
+#  = 21
+#
+# The cost of too large is re-reading a few more days per run -- cheap, and
+# bounded. The cost of too small is silent, permanent wrongness on exactly the
+# rows a customer disputed. These are not symmetric, so the window is generous.
+#
+# `assert_no_late_arrival_outside_lookback.sql` fails the build if reality ever
+# exceeds this again.
+# --------------------------------------------------------------------------- #
+vars:
+  incremental_lookback_days: 15
+  max_refund_delay_days: 14
+  # Two MRR reconciliations, two tolerances, because they compare genuinely
+  # different things. See the two assert_mrr_* tests for the full reasoning.
+  mrr_reconciliation_tolerance: 0.005      # 0.5%  -- MRR vs subscription state
+  mrr_billing_tolerance: 0.025             # 2.5%  -- MRR accrual vs cash billed
+  # Warehouse-wide "now". Overridable so a backfill can build a date range
+  # deterministically rather than against wall-clock time.
+  run_as_of: "{{ env_var('DBT_RUN_AS_OF', '') }}"
+  raw_path: "{{ env_var('LEDGER_RAW_PATH', '/data/raw') }}"
+  date_spine_start: "2024-01-01"
+  date_spine_end: "2027-12-31"
+
+models:
+  ledger:
+    +persist_docs:
+      relation: true
+      columns: true
+
+    staging:
+      +materialized: view
+      +schema: staging
+      +tags: ["staging"]
+
+    intermediate:
+      # Ephemeral: these are CTEs compiled into their consumers. They are not
+      # part of the public contract and nothing outside the project may select
+      # from them, so materialising them would cost storage to publish an
+      # interface we explicitly do not offer.
+      +materialized: ephemeral
+      +schema: intermediate
+      +tags: ["intermediate"]
+
+    marts:
+      +materialized: table
+      +schema: marts
+      +tags: ["marts"]
+      core:
+        +tags: ["core"]
+      finance:
+        +tags: ["finance"]
+
+seeds:
+  ledger:
+    +schema: seeds
+    seed_fx_rates:
+      +column_types:
+        rate_date: date
+        currency_code: varchar
+        rate_to_usd: double
+    seed_holidays:
+      +column_types:
+        holiday_date: date
+        holiday_name: varchar
+        country_code: varchar
+
+snapshots:
+  ledger:
+    +target_schema: snapshots
+    +tags: ["snapshot"]
+
+tests:
+  ledger:
+    +store_failures: true
+    +schema: test_failures
+
+on-run-start:
+  - "{{ log('Building ledger with lookback=' ~ var('incremental_lookback_days') ~ 'd', info=true) }}"
+
+on-run-end:
+  - "{{ log('ledger build finished: ' ~ results | length ~ ' nodes', info=true) }}"

@@ -1,0 +1,6 @@
+packages:
+  # Pinned to a minor range, not floated. A dbt_utils minor bump has changed
+  # the SQL that `date_spine` emits before now; discovering that during an
+  # unrelated deploy is not a good afternoon.
+  - package: dbt-labs/dbt_utils
+    version: [">=1.3.0", "<1.4.0"]

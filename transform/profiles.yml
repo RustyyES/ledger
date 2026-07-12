@@ -1,0 +1,43 @@
+# Committed on purpose: it contains no secrets. Every credential is read from
+# the environment, so this file is configuration, not a liability.
+ledger:
+  target: "{{ env_var('DBT_TARGET', 'dev') }}"
+  outputs:
+
+    dev:
+      type: duckdb
+      path: "{{ env_var('DBT_DUCKDB_PATH', '/data/warehouse/ledger.duckdb') }}"
+      threads: 4
+      extensions: ["httpfs", "parquet"]
+      settings:
+        # MinIO speaks S3; DuckDB needs to be told it is not talking to AWS.
+        s3_region: "{{ env_var('SINK_S3_REGION', 'us-east-1') }}"
+        s3_endpoint: "{{ env_var('DBT_S3_ENDPOINT', 'minio:9000') }}"
+        s3_access_key_id: "{{ env_var('SINK_S3_ACCESS_KEY', 'minioadmin') }}"
+        s3_secret_access_key: "{{ env_var('SINK_S3_SECRET_KEY', 'minioadmin') }}"
+        s3_use_ssl: false
+        s3_url_style: "path"
+
+    # CI reads Parquet off the local filesystem -- no object store in the
+    # runner. Identical SQL, different source location, which is exactly what
+    # the `raw_path` var exists to allow.
+    ci:
+      type: duckdb
+      path: "{{ env_var('DBT_DUCKDB_PATH', 'ci_warehouse.duckdb') }}"
+      threads: 4
+      extensions: ["parquet"]
+
+    prod:
+      type: snowflake
+      account: "{{ env_var('SNOWFLAKE_ACCOUNT') }}"
+      user: "{{ env_var('SNOWFLAKE_USER') }}"
+      # Key-pair, not password. A password in a warehouse profile is a
+      # credential that cannot be rotated without a deploy.
+      private_key_path: "{{ env_var('SNOWFLAKE_PRIVATE_KEY_PATH') }}"
+      role: "{{ env_var('SNOWFLAKE_ROLE', 'TRANSFORMER') }}"
+      database: "{{ env_var('SNOWFLAKE_DATABASE', 'LEDGER') }}"
+      warehouse: "{{ env_var('SNOWFLAKE_WAREHOUSE', 'TRANSFORMING') }}"
+      schema: "{{ env_var('SNOWFLAKE_SCHEMA', 'ANALYTICS') }}"
+      threads: 8
+      client_session_keep_alive: false
+      query_tag: "dbt-ledger"
