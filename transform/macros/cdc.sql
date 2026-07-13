@@ -23,12 +23,13 @@
     which has millisecond resolution and ties on high-throughput tables, and
     NOT `_kafka_offset`, which is only ordered within one Kafka partition.
 #}
-{% macro cdc_version_order() %}
-    coalesce({{ adapter.quote('_lsn') }}, 0) asc,
-    {{ adapter.quote('_source_ts') }} asc nulls first,
-    {{ adapter.quote('_kafka_partition') }} asc,
-    {{ adapter.quote('_kafka_offset') }} asc
-{% endmacro %}
+{% macro cdc_version_order(direction='asc') %}
+    {%- set nulls = 'nulls first' if direction == 'asc' else 'nulls last' -%}
+    coalesce({{ adapter.quote('_lsn') }}, 0) {{ direction }},
+    {{ adapter.quote('_source_ts') }} {{ direction }} {{ nulls }},
+    {{ adapter.quote('_kafka_partition') }} {{ direction }},
+    {{ adapter.quote('_kafka_offset') }} {{ direction }}
+{%- endmacro %}
 
 
 {#
@@ -46,7 +47,7 @@
             {{ relation_alias }}.*,
             row_number() over (
                 partition by {{ relation_alias }}.{{ key_column }}
-                order by {{ cdc_version_order() }} desc
+                order by {{ cdc_version_order('desc') }}
             ) as _version_rank
         from {{ relation_alias }}
     )
