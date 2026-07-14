@@ -1,0 +1,52 @@
+version: 2
+
+sources:
+  - name: ledger_raw
+    description: >
+      The raw CDC landing zone: Parquet written by `services/cdc-sink`, one
+      prefix per source table, partitioned by `_ingested_date`.
+
+      Two record populations share this layer. The bulk export
+      (`_op='r'`, `_kafka_partition=-1`) is a consistent snapshot taken at a
+      known LSN; everything after it is streamed change data. Staging reconciles
+      them -- see the `cdc_latest` macro.
+
+      Nothing is ever deleted here. A source-side DELETE arrives as a row with
+      `_op='d'` carrying its before-image.
+    database: "{{ env_var('SNOWFLAKE_DATABASE', 'LEDGER') }}"
+    schema: raw
+    loader: cdc-sink
+    tags: ["raw"]
+
+    # Freshness is measured on `_ingested_at`, not on any business column. A
+    # source can legitimately have no new ORDERS for an hour at 04:00; what it
+    # cannot legitimately have is no new RECORDS reaching the pipeline, because
+    # the sink writes even when the business is quiet.
+    loaded_at_field: _ingested_at
+    freshness:
+      warn_after: {count: 2, period: hour}
+      error_after: {count: 6, period: hour}
+
+    tables:
+      - name: customers
+        description: "Customer master. Soft-deleted only; `deleted_at` is set and the row remains."
+      - name: plans
+        description: "Reference pricing. Small, slow-changing, includes retired plans."
+        freshness: null      # plans change twice a year; freshness is meaningless
+      - name: subscriptions
+        description: "Current subscription state per customer. Mutable."
+      - name: subscription_events
+        description: >
+          Append-only lifecycle log. The source of truth for MRR. The only
+          source table where an append-only incremental strategy is safe,
+          because rows are never updated.
+      - name: orders
+        description: >
+          Orders. `placed_at` is NULLABLE -- 15% of rows carry naive local time
+          in `placed_at_local` instead. `status` contains legacy spellings.
+      - name: payments
+        description: "Payments. `processed_at` is null while pending."
+      - name: refunds
+        description: >
+          Refunds, issued 1-14 days after the payment they reverse. The
+          late-arrival source that drives the incremental lookback design.
