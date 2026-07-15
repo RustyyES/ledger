@@ -1,0 +1,202 @@
+version: 2
+
+models:
+  - name: stg_customers
+    description: >
+      One row per customer, latest CDC version. Soft-deleted customers are
+      RETAINED (see the model's header comment for why).
+    # Model-level, not column-level: dbt_utils prefixes a column-level
+    # expression with the column name, which would emit
+    # `country_code length(country_code) = 2`.
+    data_tests:
+      - dbt_utils.expression_is_true:
+          arguments:
+            expression: "length(country_code) = 2"
+    columns:
+      - name: customer_id
+        description: "Natural key from the source system."
+        data_tests: [unique, not_null]
+      - name: email
+        data_tests: [not_null]
+      - name: country_code
+        description: "ISO-3166-1 alpha-2, upper-cased. Changes when a customer relocates -- this is what SCD2 on dim_customer tracks."
+        data_tests:
+          - not_null
+      - name: timezone
+        description: "IANA name. Used to resolve naive local order timestamps."
+        data_tests: [not_null]
+      - name: is_deleted
+        data_tests: [not_null]
+      - name: is_hard_deleted
+        description: "Should always be false -- the application only soft-deletes."
+        data_tests:
+          - accepted_values:
+              values: [false]
+              quote: false
+      - name: created_at
+        data_tests: [not_null]
+      - name: updated_at
+        data_tests: [not_null]
+
+  - name: stg_plans
+    description: "Reference pricing, including retired plans."
+    columns:
+      - name: plan_id
+        data_tests: [unique, not_null]
+      - name: plan_code
+        data_tests:
+          - unique
+          - not_null
+          - accepted_values:
+              values: ["legacy_starter", "basic", "pro", "enterprise"]
+      - name: monthly_cents
+        data_tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
+      - name: currency_code
+        data_tests: [not_null]
+
+  - name: stg_subscriptions
+    columns:
+      - name: subscription_id
+        data_tests: [unique, not_null]
+      - name: customer_id
+        data_tests:
+          - not_null
+          - relationships:
+              to: ref('stg_customers')
+              field: customer_id
+      - name: plan_id
+        data_tests:
+          - not_null
+          - relationships:
+              to: ref('stg_plans')
+              field: plan_id
+      - name: subscription_status
+        data_tests:
+          - not_null
+          - accepted_values:
+              values: ["trialing", "active", "paused", "cancelled", "expired"]
+      - name: started_at
+        data_tests: [not_null]
+      - name: ended_at
+        description: "Null while live."
+        data_tests:
+          - not_null_where:
+              arguments:
+                  condition: "subscription_status = 'cancelled'"
+
+  - name: stg_subscription_events
+    description: "Append-only lifecycle log. The source of truth for MRR."
+    columns:
+      - name: subscription_event_id
+        data_tests: [unique, not_null]
+      - name: subscription_id
+        data_tests:
+          - not_null
+          - relationships:
+              to: ref('stg_subscriptions')
+              field: subscription_id
+      - name: event_type
+        data_tests:
+          - not_null
+          - accepted_values:
+              values: ["created", "upgraded", "downgraded", "paused", "resumed", "cancelled", "expired"]
+      - name: to_plan_id
+        data_tests:
+          - relationships:
+              to: ref('stg_plans')
+              field: plan_id
+      - name: occurred_at
+        data_tests: [not_null]
+
+  - name: stg_orders
+    description: >
+      Orders with the legacy status vocabulary normalised. Timestamps are NOT
+      resolved here -- that needs a join and happens in int_orders__resolved.
+    columns:
+      - name: order_id
+        data_tests: [unique, not_null]
+      - name: customer_id
+        data_tests:
+          - not_null
+          - relationships:
+              to: ref('stg_customers')
+              field: customer_id
+      - name: order_status
+        description: "Normalised. 'unknown' means a legacy spelling nobody has mapped yet."
+        data_tests:
+          - not_null
+          - accepted_values:
+              values: ["pending", "completed", "cancelled", "refunded"]
+      - name: has_unrecognised_status
+        description: "True means normalise_order_status hit a value it does not know."
+        data_tests:
+          - accepted_values:
+              values: [false]
+              quote: false
+      - name: amount_cents
+        data_tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
+      - name: currency_code
+        data_tests:
+          - not_null
+          - accepted_values:
+              values: ["USD", "EUR", "GBP"]
+      - name: order_channel
+        data_tests:
+          - accepted_values:
+              values: ["web", "mobile", "api", "unknown"]
+
+  - name: stg_payments
+    columns:
+      - name: payment_id
+        data_tests: [unique, not_null]
+      - name: order_id
+        data_tests:
+          - not_null
+          - relationships:
+              to: ref('stg_orders')
+              field: order_id
+      - name: payment_status
+        data_tests:
+          - not_null
+          - accepted_values:
+              values: ["pending", "succeeded", "failed"]
+      - name: payment_method
+        data_tests:
+          - accepted_values:
+              values: ["card", "paypal", "bank_transfer", "apple_pay"]
+      - name: processed_at
+        description: >
+          Null while pending -- legitimately. This is why the test is scoped
+          rather than a blanket not_null.
+        data_tests:
+          - not_null_where:
+              arguments:
+                  condition: "payment_status = 'succeeded'"
+      - name: amount_cents
+        data_tests:
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
+
+  - name: stg_refunds
+    columns:
+      - name: refund_id
+        data_tests: [unique, not_null]
+      - name: payment_id
+        data_tests:
+          - not_null
+          - relationships:
+              to: ref('stg_payments')
+              field: payment_id
+      - name: refund_amount_cents
+        data_tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: "> 0"
+      - name: issued_at
+        data_tests: [not_null]
