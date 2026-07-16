@@ -1,0 +1,49 @@
+version: 2
+
+seeds:
+  - name: seed_fx_rates
+    description: >
+      Monthly closing exchange rates to USD.
+
+      MONTHLY, not daily, and that is a business decision rather than a
+      convenience. Finance restates non-USD revenue at the month's closing rate;
+      a daily rate would imply a precision the company does not actually use and
+      would make two people reconciling the same month disagree by rounding.
+
+      The rate that applies to an order is the one for the month the order was
+      PLACED IN -- not today's rate. Using today's rate means last quarter's
+      revenue changes every morning, which finance notices immediately and
+      trusts you less for afterwards.
+
+      A USD -> USD row at 1.0 is present on purpose: it means the conversion
+      join never special-cases the reporting currency, and a missing rate is
+      unambiguously an error rather than an implicit identity.
+    columns:
+      - name: rate_date
+        description: "First day of the month the rate applies to."
+        data_tests: [not_null]
+      - name: currency_code
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["USD", "EUR", "GBP"]
+      - name: rate_to_usd
+        description: "Units of this currency per 1 USD. USD is 1.0."
+        data_tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              arguments:
+                expression: "> 0"
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [rate_date, currency_code]
+
+  - name: seed_holidays
+    description: "Dates that visibly move order volume. Drives dim_date flags."
+    columns:
+      - name: holiday_date
+        data_tests: [not_null]
+      - name: holiday_name
+        data_tests: [not_null]
