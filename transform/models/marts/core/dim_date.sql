@@ -77,12 +77,17 @@ enriched as (
                 then extract(year from date_day)
             else extract(year from date_day) - 1
         end                                           as fiscal_year,
-        (
+        -- floor division, not `/`. In DuckDB and Snowflake `/` on integers is
+        -- FLOAT division, which silently produced 1.0, 1.333, 1.667, 2.0 ...
+        -- i.e. twelve distinct "quarters". The accepted_values test caught it.
+        cast(floor(
             (
-                cast(extract(month from date_day) as integer)
-                - {{ fiscal_year_start_month }} + 12
-            ) % 12
-        ) / 3 + 1                                     as fiscal_quarter,
+                (
+                    cast(extract(month from date_day) as integer)
+                    - {{ fiscal_year_start_month }} + 12
+                ) % 12
+            ) / 3
+        ) as integer) + 1                             as fiscal_quarter,
         cast(
             (
                 (
