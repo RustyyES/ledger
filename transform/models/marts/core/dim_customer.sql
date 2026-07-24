@@ -72,7 +72,14 @@ versioned as (
         -- A customer cannot have placed an order before they existed, so this
         -- is exactly the right lower bound -- not an approximation.
         -- ------------------------------------------------------------------
-        dbt_valid_from                                                   as valid_from,
+        case
+            when
+                row_number() over (
+                    partition by customer_id order by dbt_valid_from
+                ) = 1
+                then least(dbt_valid_from, created_at)
+            else dbt_valid_from
+        end                                                              as valid_from,
         dbt_valid_to                                                     as valid_to,
         -- An explicit far-future sentinel makes the as-of BETWEEN join work
         -- without a `coalesce` at every call site -- and a forgotten coalesce
