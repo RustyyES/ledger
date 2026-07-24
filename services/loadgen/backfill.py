@@ -535,6 +535,21 @@ class Backfill:
             )
             if when >= self.generated_at:
                 continue  # would be in the future; skip this draw
+
+            # The eligibility index is keyed on signup DATE, but the order gets
+            # a random hour of that day. A customer who signed up at 18:00 was
+            # therefore eligible for an order at 09:00 the same morning --
+            # i.e. an order placed before the customer existed.
+            #
+            # Downstream that is not a harmless oddity: the as-of join in
+            # `fct_orders` finds no dim_customer version covering the order, so
+            # `customer_key` is NULL and the order silently drops out of every
+            # dimensional aggregate while staying in the fact table. Row counts
+            # still reconcile, which is what makes it hard to notice.
+            #
+            # Caught by `assert_every_order_resolves_a_customer_version`.
+            if when < c.signup:
+                continue
             amount = self._localise_amount(self._one_off_amount(), c.currency)
             self._emit_order(c, when, amount, orders, payments, refunds, subscription=False)
 
