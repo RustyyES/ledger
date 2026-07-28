@@ -2,7 +2,7 @@
     config(
         materialized='incremental',
         unique_key='subscription_event_id',
-        incremental_strategy='append',
+        incremental_strategy='delete+insert',
         tags=['marts', 'finance', 'fact']
     )
 }}
