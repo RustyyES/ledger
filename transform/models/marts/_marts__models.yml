@@ -1,0 +1,315 @@
+version: 2
+
+models:
+  # ========================================================================= #
+  # Dimensions
+  # ========================================================================= #
+
+  - name: dim_date
+    description: >
+      Generated date spine, 2024-2027, with fiscal periods (February start) and
+      holiday flags. GENERATED, not derived from facts -- a spine built from the
+      data has gaps exactly on the zero-activity days that matter most.
+    columns:
+      - name: date_key
+        data_tests: [unique, not_null]
+      - name: date_day
+        data_tests: [unique, not_null]
+      - name: days_in_month
+        description: "Drives calendar-day MRR proration."
+        data_tests:
+          - not_null
+          - between:
+              arguments:
+                min_value: 28
+                max_value: 31
+      - name: fiscal_quarter
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [1, 2, 3, 4]
+                quote: false
+      - name: is_weekend
+        data_tests: [not_null]
+
+  - name: dim_plan
+    description: "Plan dimension, Type 1. Includes retired plans -- they still carry live subscriptions."
+    columns:
+      - name: plan_key
+        data_tests: [unique, not_null]
+      - name: plan_id
+        data_tests: [unique, not_null]
+      - name: plan_code
+        data_tests: [unique, not_null]
+      - name: monthly_cents
+        data_tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              arguments:
+                expression: ">= 0"
+      - name: plan_tier
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ["legacy", "entry", "mid", "top"]
+
+  - name: dim_customer
+    description: >
+      SCD Type 2 customer dimension. Grain: one row per customer per VERSION.
+
+      Joining a fact on `customer_id` alone MULTIPLIES it by the version count.
+      Use the surrogate `customer_key` (already resolved as-of in the facts), or
+      an explicit as-of / is_current predicate.
+    data_tests:
+      - scd2_no_overlaps:
+          arguments:
+            natural_key: customer_id
+      - scd2_exactly_one_current:
+          arguments:
+            natural_key: customer_id
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [customer_id, valid_from]
+    columns:
+      - name: customer_key
+        description: "Surrogate. Unique per (customer, version)."
+        data_tests: [unique, not_null]
+      - name: customer_id
+        description: "Natural key. NOT unique -- one row per version."
+        data_tests: [not_null]
+      - name: valid_from
+        data_tests: [not_null]
+      - name: valid_to
+        description: "Null for the current version. Use valid_to_or_infinity in range joins."
+      - name: valid_to_or_infinity
+        data_tests: [not_null]
+      - name: is_current
+        data_tests: [not_null]
+      - name: country_code
+        data_tests: [not_null]
+      - name: version_number
+        data_tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              arguments:
+                expression: ">= 1"
+
+  # ========================================================================= #
+  # Facts
+  # ========================================================================= #
+
+  - name: fct_orders
+    description: >
+      Order fact. Grain: one row per order. `customer_key` is resolved AS OF
+      `placed_at_utc`, so historical attribution is stable across relocations.
+    data_tests:
+      - rowcount_matches:
+          arguments:
+            compare_model: ref('stg_orders')
+            tolerance: 0.0
+    columns:
+      - name: order_id
+        data_tests: [unique, not_null]
+      - name: customer_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_customers')
+                field: customer_id
+      - name: customer_key
+        description: "As-of surrogate key. Null only if no dim version covers placed_at_utc, which assert_every_order_resolves_a_customer_version forbids."
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('dim_customer')
+                field: customer_key
+      - name: date_key
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_date')
+                field: date_key
+      - name: order_status
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["pending", "completed", "cancelled", "refunded"]
+      - name: amount_cents
+        data_tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              arguments:
+                expression: ">= 0"
+      - name: amount_usd_cents
+        description: "Converted at the rate in force in the order's month, not today's."
+        data_tests:
+          - not_null_where:
+              arguments:
+                condition: "not is_fx_rate_missing"
+      - name: placed_at_utc
+        data_tests: [not_null]
+      - name: order_date
+        data_tests: [not_null]
+
+  - name: fct_payments
+    description: >
+      Payment fact. Grain: one row per payment. `refunded_amount_cents` is a
+      running total over children that arrive up to 14 days late -- which is why
+      this model's incremental filter is on `_ingested_at`, not `processed_at`.
+    columns:
+      - name: payment_id
+        data_tests: [unique, not_null]
+      - name: order_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('fct_orders')
+                field: order_id
+      - name: payment_status
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["pending", "succeeded", "failed"]
+      - name: gross_amount_cents
+        data_tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              arguments:
+                expression: ">= 0"
+      - name: refunded_amount_cents
+        data_tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              arguments:
+                expression: ">= 0"
+      - name: net_amount_cents
+        description: "gross - refunded. Never negative; assert_refund_not_exceeding_payment enforces it."
+        data_tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              arguments:
+                expression: ">= 0"
+      - name: processed_at
+        description: "Null while pending -- legitimately. Hence the scoped test."
+        data_tests:
+          - not_null_where:
+              arguments:
+                condition: "payment_status = 'succeeded'"
+      - name: refund_lag_days
+        description: >
+          Calendar days between the payment and its last refund. MUST stay
+          inside the incremental lookback -- a value beyond it means a refund
+          that the incremental run can no longer see, and a permanently wrong
+          net_amount. Bound is read from the var so the two can never drift.
+        data_tests:
+          - between:
+              arguments:
+                min_value: 0
+                max_value: "{{ var('incremental_lookback_days') }}"
+                where_clause: "refund_lag_days is not null"
+
+  - name: fct_subscription_events
+    description: >
+      Lifecycle event fact. Grain: one row per event. The source for MRR.
+      Uses delete+insert, NOT append -- see the model header for the duplication
+      bug that made that necessary.
+    columns:
+      - name: subscription_event_id
+        data_tests: [unique, not_null]
+      - name: subscription_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_subscriptions')
+                field: subscription_id
+      - name: event_type
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["created", "upgraded", "downgraded", "paused", "resumed", "cancelled", "expired"]
+      - name: occurred_at
+        data_tests: [not_null]
+
+  # ========================================================================= #
+  # Metrics
+  # ========================================================================= #
+
+  - name: fct_mrr_daily
+    description: >
+      Daily MRR with calendar-day proration. Grain: one row per day.
+      Built from a date spine LEFT JOINed to plan intervals, because MRR is a
+      stock (has a value every day) not a flow (only on days something happened).
+    columns:
+      - name: date_day
+        data_tests: [unique, not_null]
+      - name: mrr_cents
+        data_tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              arguments:
+                expression: ">= 0"
+      - name: active_subscriptions
+        data_tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              arguments:
+                expression: ">= 0"
+      - name: paying_customers
+        data_tests: [not_null]
+
+  - name: fct_cohort_retention
+    description: >
+      Retention by signup cohort. Grain: one row per (cohort month, period).
+      Right-censored rows are NOT emitted -- see the model header.
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [cohort_month, period_number]
+    columns:
+      - name: cohort_period_key
+        data_tests: [unique, not_null]
+      - name: retention_pct
+        description: "Cannot exceed 100 -- retained customers are a subset of the cohort."
+        data_tests:
+          - not_null
+          - between:
+              arguments:
+                min_value: 0
+                max_value: 100
+      - name: period_number
+        data_tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              arguments:
+                expression: ">= 0"
+      - name: is_complete_period
+        data_tests: [not_null]
+
+  - name: fct_revenue_rolling
+    description: >
+      Rolling revenue windows with gap fill. Grain: one row per calendar day.
+      Days with zero orders appear as ZERO, not missing -- the LEFT JOIN from
+      dim_date before the window function is the entire point.
+    columns:
+      - name: date_day
+        data_tests: [unique, not_null]
+      - name: net_revenue_usd_cents
+        data_tests: [not_null]
+      - name: rolling_7d_net_usd_cents
+        data_tests: [not_null]
+      - name: is_gap_filled_day
+        description: "True means the day had no orders and was filled with zero."
+        data_tests: [not_null]
+      - name: order_count
+        data_tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              arguments:
+                expression: ">= 0"
