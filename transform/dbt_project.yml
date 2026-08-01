@@ -47,7 +47,7 @@ require-dbt-version: [">=1.8.0", "<2.0.0"]
 # exceeds this again.
 # --------------------------------------------------------------------------- #
 vars:
-  incremental_lookback_days: 15
+  incremental_lookback_days: 21
   max_refund_delay_days: 14
   # Two MRR reconciliations, two tolerances, because they compare genuinely
   # different things. See the two assert_mrr_* tests for the full reasoning.
