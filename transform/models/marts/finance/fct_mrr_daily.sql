@@ -126,7 +126,7 @@ daily_subscription_revenue as (
     -- only test that could have. Every key was unique, every foreign key
     -- resolved, nothing was null. The number was simply wrong.
     -- ----------------------------------------------------------------------
-    where plan_periods.revenue_state = 'earning'
+    where plan_periods.can_earn_revenue
 
 ),
 
