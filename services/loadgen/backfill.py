@@ -480,10 +480,15 @@ class Backfill:
             return
 
         while cursor < stop:
-            amount = self.plans[c.plan_code][1] if c.plan_code else 1900
+            # Bill the plan in force ON THIS DATE. See CustomerState.plan_on.
+            amount = self.plans[c.plan_on(cursor)][1]
             amount = self._localise_amount(amount, c.currency)
             self._emit_order(c, cursor, amount, orders, payments, refunds, subscription=True)
-            cursor += timedelta(days=30)
+            # Advance by a CALENDAR month, not 30 days. A 30-day cycle produces
+            # 12.17 billings a year against 12 months of MRR -- a permanent 1.4%
+            # discrepancy that no amount of correct modelling can reconcile,
+            # because the data itself is inconsistent.
+            cursor = _add_month(cursor)
 
     def _one_off_orders(self, count: int, orders, payments, refunds) -> None:
         if count <= 0 or not self.customers:
