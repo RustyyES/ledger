@@ -1,0 +1,26 @@
+version: 2
+
+models:
+  - name: ops_schema_changes
+    description: >
+      Every schema change the CDC sink observed, with the guard's verdict.
+      Empty on a fresh install; populated the first time a source schema moves.
+      `make schema-change` applies migration 0003 to produce one on demand.
+    columns:
+      - name: change
+        description: "additive | widening | dropped | incompatible"
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ["additive", "widening", "dropped", "incompatible"]
+              config:
+                # An empty audit is the normal state on a fresh warehouse, and a
+                # test that fails on "nothing has gone wrong yet" gets muted.
+                where: "change is not null"
+      - name: outcome
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ["halted this table", "accepted, backfilled null", "accepted", "unknown"]
+              config:
+                where: "outcome is not null"
