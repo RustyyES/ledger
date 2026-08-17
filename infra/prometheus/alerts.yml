@@ -1,0 +1,67 @@
+groups:
+  - name: ledger-pipeline
+    interval: 30s
+    rules:
+
+      # The single most important alert in the file. Lag that keeps growing
+      # means the sink will never catch up on its own, and every mart built
+      # downstream is quietly stale rather than wrong -- which is worse,
+      # because nothing looks broken.
+      - alert: CdcConsumerLagGrowing
+        expr: sink_consumer_lag_records > 100000
+        for: 10m
+        labels: {severity: critical}
+        annotations:
+          summary: "CDC sink lag > 100k on {{ $labels.topic }}/{{ $labels.partition }}"
+          runbook: "Check cdc-sink logs for a halted table; see INCIDENTS.md#003"
+
+      # A halted table means the schema guard rejected a batch. Data is being
+      # RETAINED (offsets are not committed), not lost -- but it stops flowing
+      # until a human decides what the schema change means.
+      - alert: SinkTableHalted
+        expr: sink_halted_tables > 0
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: "{{ $value }} table(s) halted by the schema guard"
+          runbook: "Inspect the DLQ, then POST /resume/{table}. INCIDENTS.md#002"
+
+      - alert: SinkNotFlushing
+        expr: time() - sink_last_flush_timestamp_seconds > 900
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.table }} has not flushed in 15 minutes"
+
+      - alert: DlqReceivingRecords
+        expr: increase(sink_dlq_records_total[15m]) > 0
+        for: 1m
+        labels: {severity: warning}
+        annotations:
+          summary: "Records diverted to the DLQ for {{ $labels.table }}"
+
+      - alert: MetricsApiServingStaleData
+        expr: increase(metrics_api_requests_total{status="503"}[10m]) > 5
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "Metrics API returning 503 -- warehouse likely stale"
+
+      - alert: CommerceApiErrorRate
+        expr: |
+          sum(rate(commerce_http_requests_total{status=~"5.."}[5m]))
+            / sum(rate(commerce_http_requests_total[5m])) > 0.02
+        for: 5m
+        labels: {severity: critical}
+        annotations:
+          summary: "Commerce API 5xx rate above 2%"
+
+      - alert: MetricsApiLatencySlo
+        expr: |
+          histogram_quantile(0.95,
+            sum(rate(metrics_api_request_duration_seconds_bucket[5m])) by (le, route)
+          ) > 0.2
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "p95 latency above the 200ms SLO on {{ $labels.route }}"
