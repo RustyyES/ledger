@@ -1,0 +1,13 @@
+{
+  "generated_at": "2026-08-29T00:48:49.948021+00:00",
+  "payment_id": "ddf337ec-d786-484b-aed0-7312f843c06c",
+  "payment_processed_at": "2026-08-16T07:06:04+00:00",
+  "refund_issued_at": "2026-08-29T00:48:49.948021+00:00",
+  "arrival_lag_days": 12,
+  "configured_lookback_days": 21,
+  "refund_amount_cents": 577,
+  "refunded_before": 0,
+  "refunded_after": 577,
+  "landed": true,
+  "why_this_matters": "An incremental model filtered on the payment's own business timestamp would never re-select this row: its processed_at is 12 days old and far below max(processed_at). The refund would be invisible and net_amount_cents permanently overstated. Filtering on _ingested_at -- when the record reached the pipeline -- makes a late fact recent by definition."
+}

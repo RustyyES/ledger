@@ -1,0 +1,33 @@
+{
+  "generated_at": "2026-08-29T00:48:43.639026+00:00",
+  "rows": 100000,
+  "partition_date": "2025-03-01",
+  "steps": [
+    {
+      "step": "initial_write",
+      "files": 3
+    },
+    {
+      "step": "replay_same_order",
+      "identical": true,
+      "files": 3
+    },
+    {
+      "step": "replay_shuffled_arrival_order",
+      "identical": true,
+      "files": 3
+    },
+    {
+      "step": "overlapping_replay",
+      "identical": true,
+      "rows_after": 100000,
+      "duplicate_offsets": 0
+    }
+  ],
+  "checksums": {
+    "part-000-000000000.parquet": "750861987715ffd7fa1be18d2af9bf7320fd68b9955e37d44cd771a2efb2140f",
+    "part-001-000000000.parquet": "91786f6a74be04f6022e177e4557241bd4aa1dac592c3287f7aea8b3b8ae086c",
+    "part-002-000000000.parquet": "442cd419aa0bf86b95201aff964bc03156cfd7caa8474daa250ce8fd3f80769a"
+  },
+  "all_identical": true
+}
