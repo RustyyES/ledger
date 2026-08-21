@@ -1,0 +1,45 @@
+{
+  "generated_at": "2026-08-29T00:49:01.366098+00:00",
+  "range": {
+    "start": "2026-06-01",
+    "end": "2026-06-30"
+  },
+  "before": {
+    "rows": 1409,
+    "sha256": "1ec442cc57d6f229057544db8fde0cfc05a76ac64e1ee434c81ede75f995046c",
+    "columns": [
+      "order_id",
+      "customer_id",
+      "customer_key",
+      "date_key",
+      "order_date",
+      "order_status",
+      "order_channel",
+      "amount_cents",
+      "currency_code",
+      "amount_usd_cents",
+      "placed_at_utc",
+      "subscription_id"
+    ]
+  },
+  "after": {
+    "rows": 1409,
+    "sha256": "1ec442cc57d6f229057544db8fde0cfc05a76ac64e1ee434c81ede75f995046c",
+    "columns": [
+      "order_id",
+      "customer_id",
+      "customer_key",
+      "date_key",
+      "order_date",
+      "order_status",
+      "order_channel",
+      "amount_cents",
+      "currency_code",
+      "amount_usd_cents",
+      "placed_at_utc",
+      "subscription_id"
+    ]
+  },
+  "identical": true,
+  "note": "Checksum excludes _ingested_at, which is pipeline metadata rather than a business fact and legitimately differs across re-ingestion. Every column a consumer can read is included."
+}
