@@ -1,0 +1,248 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# A new push supersedes an in-flight run on the same branch. Without this a
+# busy PR queues five redundant runs and the useful one waits behind them.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+
+  # ========================================================================= #
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install linters
+        run: pip install ruff==0.8.4 mypy==1.14.0 sqlfluff==3.2.5 sqlfluff-templater-dbt==3.2.5 dbt-core==1.9.1 dbt-duckdb==1.9.1
+
+      - name: ruff
+        run: |
+          ruff check services/ orchestration/ scripts/
+          ruff format --check services/ orchestration/ scripts/
+
+      # Per-service. Both have a top-level `app` module; passing both paths to
+      # one mypy invocation reports "Duplicate module named app" and checks
+      # neither -- a lint step that silently checks nothing is worse than none.
+      - name: mypy (commerce-api)
+        working-directory: services/commerce-api
+        run: mypy app --ignore-missing-imports
+
+      - name: mypy (metrics-api)
+        working-directory: services/metrics-api
+        run: mypy app --ignore-missing-imports
+
+      - name: sqlfluff
+        working-directory: transform
+        run: |
+          dbt deps
+          sqlfluff lint models/ --processes 4
+
+      # The spec's hardest Airflow rule, enforced in CI rather than in review.
+      - name: no sleep() in DAGs
+        run: |
+          if grep -rnE '^[^#]*\b(time|asyncio)\.sleep\s*\(' orchestration/dags/; then
+            echo "::error::sleep() found in DAG code -- use a Sensor in reschedule mode"
+            exit 1
+          fi
+          echo "no sleep() in DAG code"
+
+  # ========================================================================= #
+  test-services:
+    name: test services
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: ledger
+          POSTGRES_PASSWORD: ledger
+          POSTGRES_DB: ledger_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ledger"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Commerce API
+        working-directory: services/commerce-api
+        env:
+          COMMERCE_TEST_DATABASE_URL: postgresql+psycopg://ledger:ledger@localhost:5432/ledger_test
+        run: |
+          pip install -r requirements-dev.txt
+          pytest -q --cov=app --cov-report=term-missing --cov-fail-under=70
+
+      # No services needed: this suite guards the SHAPE of the generated data.
+      # If the shape flattens, every downstream test still passes while testing
+      # nothing, which is the worst state for a suite to be in.
+      - name: Load generator
+        working-directory: services/loadgen
+        run: |
+          pip install -r requirements.txt pytest
+          pytest tests/ -q
+
+      - name: CDC sink
+        working-directory: services/cdc-sink
+        run: |
+          pip install -r requirements-dev.txt
+          pytest -q --cov=. --cov-report=term-missing
+
+  # ========================================================================= #
+  test-dags:
+    name: airflow dag integrity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install Airflow
+        run: |
+          pip install "apache-airflow==2.10.4" pytest \
+            --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-2.10.4/constraints-${{ env.PYTHON_VERSION }}.txt"
+          pip install confluent-kafka boto3 pyarrow duckdb structlog
+      - name: DAG integrity
+        working-directory: orchestration
+        env:
+          AIRFLOW_HOME: /tmp/airflow
+          PYTHONPATH: dags:../services/cdc-sink
+        run: pytest tests/ -q
+
+  # ========================================================================= #
+  # The job that matters.
+  #
+  # A CI that lints Python and calls it done is a repo with a .github folder for
+  # decoration. This one builds the ENTIRE warehouse against fixture data and
+  # runs every dbt test -- so a modelling regression fails the PR, which is the
+  # only place a modelling regression is cheap to fix.
+  # ========================================================================= #
+  dbt:
+    name: dbt build against fixtures
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: ledger
+          POSTGRES_PASSWORD: ledger
+          POSTGRES_DB: ledger
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ledger"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install
+        run: |
+          pip install dbt-core==1.9.1 dbt-duckdb==1.9.1 duckdb pyarrow psycopg[binary] structlog pydantic pydantic-settings alembic sqlalchemy
+
+      - name: Apply migrations
+        working-directory: services/commerce-api
+        env:
+          COMMERCE_DATABASE_URL: postgresql+psycopg://ledger:ledger@localhost:5432/ledger
+        run: alembic upgrade 0002
+
+      # Small but SHAPED. A fixture of 200 uniform rows would let every
+      # modelling bug through: no late refunds, no relocations, no legacy
+      # statuses, nothing for the tests to catch. 2% scale keeps all six
+      # messiness patterns and runs in about 20 seconds.
+      - name: Generate fixture data
+        working-directory: services/loadgen
+        env:
+          COMMERCE_DATABASE_URL: postgresql://ledger:ledger@localhost:5432/ledger
+        run: |
+          pip install -r requirements.txt
+          python backfill.py --scale 0.004 --truncate
+
+      - name: Export raw Parquet
+        working-directory: services/cdc-sink
+        env:
+          COMMERCE_DATABASE_URL: postgresql://ledger:ledger@localhost:5432/ledger
+        run: python bulk_export.py --dsn "$COMMERCE_DATABASE_URL" --local-path "$GITHUB_WORKSPACE/ci_raw"
+
+      - name: dbt build
+        working-directory: transform
+        env:
+          DBT_TARGET: ci
+          DBT_PROFILES_DIR: ${{ github.workspace }}/transform
+          LEDGER_RAW_PATH: ${{ github.workspace }}/ci_raw
+          DBT_DUCKDB_PATH: ${{ github.workspace }}/ci_warehouse.duckdb
+        run: |
+          dbt deps
+          dbt build --target ci
+
+      # Proves the incremental path, not just the full-refresh one. A model can
+      # build perfectly from scratch and be wrong on every subsequent run.
+      - name: dbt build again (incremental)
+        working-directory: transform
+        env:
+          DBT_TARGET: ci
+          DBT_PROFILES_DIR: ${{ github.workspace }}/transform
+          LEDGER_RAW_PATH: ${{ github.workspace }}/ci_raw
+          DBT_DUCKDB_PATH: ${{ github.workspace }}/ci_warehouse.duckdb
+        run: dbt build --target ci
+
+      - name: Metrics API tests
+        working-directory: services/metrics-api
+        env:
+          METRICS_WAREHOUSE_PATH: ${{ github.workspace }}/ci_warehouse.duckdb
+          PYTHONPATH: .
+        run: |
+          pip install -r requirements.txt pytest httpx
+          pytest -q
+
+      - name: Upload the built warehouse on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-warehouse
+          path: ci_warehouse.duckdb
+          retention-days: 3
+
+  # ========================================================================= #
+  build:
+    name: build images
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - {name: commerce-api, context: services/commerce-api}
+          - {name: loadgen,      context: services/loadgen}
+          - {name: cdc-sink,     context: services/cdc-sink}
+          - {name: metrics-api,  context: services/metrics-api}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build ${{ matrix.service.name }}
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.service.context }}
+          push: false
+          cache-from: type=gha,scope=${{ matrix.service.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service.name }}
