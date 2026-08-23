@@ -1,0 +1,47 @@
+[sqlfluff]
+templater = dbt
+dialect = duckdb
+max_line_length = 100
+exclude_rules = 
+    # Column ordering in a SELECT is a readability decision, not a lint.
+    ST06,
+    # Requires a leading comma style we do not use.
+    LT04,
+    # Ambiguous column references are already caught by dbt compilation.
+    RF02
+
+[sqlfluff:templater:dbt]
+project_dir = transform
+profiles_dir = transform
+profile = ledger
+target = ci
+
+# Column aliases are ALIGNED throughout this project, deliberately: a mart
+# model with thirty columns is read far more often than it is written, and a
+# ragged right edge makes it noticeably harder to scan for the column you want.
+# Telling sqlfluff that alignment is intended is better than switching LT01 off,
+# because the rule still catches genuinely inconsistent spacing elsewhere.
+[sqlfluff:layout:type:alias_expression]
+spacing_before = align
+align_within = select_clause
+align_scope = bracketed
+
+[sqlfluff:indentation]
+indented_joins = false
+indented_ctes = false
+template_blocks_indent = false
+
+[sqlfluff:rules:capitalisation.keywords]
+capitalisation_policy = lower
+
+[sqlfluff:rules:capitalisation.functions]
+extended_capitalisation_policy = lower
+
+[sqlfluff:rules:capitalisation.identifiers]
+extended_capitalisation_policy = lower
+
+[sqlfluff:rules:aliasing.table]
+aliasing = explicit
+
+[sqlfluff:rules:references.keywords]
+ignore_words = table, column, change, status, name, value, key, method, source, year_month, year, month, day
