@@ -9,6 +9,7 @@ engineer has originates at that boundary: schemas change without warning, rows
 get soft-deleted, refunds arrive three days after the order they reverse,
 timestamps come in three timezones.
 
+
 Ledger puts a real commerce application underneath the pipeline so those
 problems are real rather than simulated. A FastAPI service writes to Postgres,
 Debezium streams the WAL into Kafka, a hand-written sink lands Parquet, dbt
