@@ -29,6 +29,7 @@ populated by CDC, dbt models building on a schedule, and MRR you can query.
 
 ---
 
+
 ## What is actually here
 
 ```
